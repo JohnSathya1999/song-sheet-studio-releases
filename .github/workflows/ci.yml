@@ -90,7 +90,9 @@ jobs:
 
   android:
     name: Android (APK + AAB)
-    if: github.event.action == 'tag-push'
+    # Runs on every push now, not just a version tag — this repo's
+    # runners are unlimited, and the "rolling latest" release below
+    # needs a fresh build on every push to actually be current.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -138,8 +140,8 @@ jobs:
     name: iOS (unsigned)
     # Unlike the private repo's release.yml (which only builds this on a
     # manual run, to save its capped Actions minutes), the public repo's
-    # macOS minutes are unlimited too — no reason left to gate this.
-    if: github.event.action == 'tag-push'
+    # macOS minutes are unlimited too — no reason left to gate this. Runs
+    # on every push, same as android above.
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -172,9 +174,15 @@ jobs:
           if-no-files-found: error
 
   release:
-    name: Create GitHub Release (on the private repo)
+    name: Publish downloads
     needs: [android, ios]
-    if: ${{ !cancelled() && github.event.action == 'tag-push' && needs.android.result == 'success' }}
+    # Runs after every push now (was tag-push only) — the rolling
+    # "latest" mirror below needs to refresh every time to actually
+    # stay current. A brand-new *versioned* release on the private repo
+    # is still only cut for an actual version tag (see the step below);
+    # a plain push to main doesn't spawn a new numbered release each
+    # time, just refreshes the one rolling build.
+    if: ${{ !cancelled() && needs.android.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -190,13 +198,16 @@ jobs:
             cp artifacts/ios-unsigned/SongSheetStudio-unsigned.ipa release/SongSheetStudio-unsigned.ipa
           fi
 
-      # Releases still live on the private repo (song-sheet-studio),
-      # matching where they've always lived — this workflow just runs
-      # somewhere else now. softprops/action-gh-release doesn't reliably
-      # support targeting a repo other than the one running the workflow,
-      # so this uses `gh release create` directly against PRIVATE_REPO
+      # Only for an actual version tag (git tag vX.Y.Z pushed on the
+      # private repo) — a real, permanent, numbered release. Releases
+      # still live on the private repo (song-sheet-studio), matching
+      # where they've always lived — this workflow just runs somewhere
+      # else now. softprops/action-gh-release doesn't reliably support
+      # targeting a repo other than the one running the workflow, so
+      # this uses `gh release create` directly against PRIVATE_REPO
       # instead, the same way the public-mirror step below already does.
-      - name: Create the release on the private repo
+      - name: Create a versioned release on the private repo (tags only)
+        if: github.event.action == 'tag-push'
         env:
           GH_TOKEN: ${{ secrets.PRIVATE_REPO_PAT }}
         run: |
@@ -213,16 +224,27 @@ jobs:
           ## iOS
           - **SongSheetStudio-unsigned.ipa** — unsigned build. It will **not** install on a real iPhone/iPad through a normal download — Apple requires a signing certificate for that. To actually test on a device, re-sign it yourself with a free Apple ID using a sideloading tool (AltStore, Sideloadly) on a Mac, or run it directly in the iOS Simulator."
 
-      # The private repo's own Release asset downloads require a signed-in
-      # GitHub session (it's private) — no good for an anonymous visitor
-      # clicking "Download for Android" on the public landing page. This
-      # repo *is* that public mirror already, so publishing to it is just
-      # the default GITHUB_TOKEN, no separate secret needed.
-      - name: Publish APK to the public downloads mirror
+      # The rolling public download mirror — one "latest" release,
+      # overwritten (not recreated) on every push, Android *and* iOS.
+      # The private repo's own Release asset downloads require a
+      # signed-in GitHub session (it's private) — no good for an
+      # anonymous visitor clicking "Download" on the public landing
+      # page. This repo *is* that public mirror already, so publishing
+      # to it is just the default GITHUB_TOKEN, no separate secret
+      # needed.
+      - name: Refresh the public "latest" downloads mirror
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create latest release/SongSheetStudio.apk \
+          assets="release/SongSheetStudio.apk release/SongSheetStudio.aab"
+          if [ -f release/SongSheetStudio-unsigned.ipa ]; then
+            assets="$assets release/SongSheetStudio-unsigned.ipa"
+          fi
+          gh release create latest $assets \
             --title "Latest build" \
-            --notes "Public download mirror — always the most recent TPM Song Sheet Android build." \
-            || gh release upload latest release/SongSheetStudio.apk --clobber
+            --notes "Public download mirror — always the most recent CHORUS build from main.
+
+          - **SongSheetStudio.apk** — installs directly on an Android device.
+          - **SongSheetStudio.aab** — Android App Bundle, for Play Console upload.
+          - **SongSheetStudio-unsigned.ipa** — unsigned iOS build (needs re-signing to install on a real device; see a versioned release's notes for details)." \
+            || gh release upload latest $assets --clobber
