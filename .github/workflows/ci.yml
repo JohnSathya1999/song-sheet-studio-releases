@@ -10,6 +10,12 @@ on:
   repository_dispatch:
     types: [main-push, tag-push]
 
+# The default GITHUB_TOKEN is read-only unless a workflow says
+# otherwise — needed here because the "release" job creates/uploads to
+# a GitHub Release on this repo using that same default token.
+permissions:
+  contents: write
+
 env:
   FLUTTER_VERSION: "3.44.4"
   PRIVATE_REPO: JohnSathya1999/song-sheet-studio
