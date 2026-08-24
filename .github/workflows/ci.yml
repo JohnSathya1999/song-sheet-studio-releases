@@ -185,6 +185,16 @@ jobs:
     if: ${{ !cancelled() && needs.android.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
+      # `gh release` needs to run from inside *some* git working
+      # directory to work at all — even when a command passes an
+      # explicit `-R owner/repo`, it still shells out to git first and
+      # fails with "not a git repository" otherwise (hit this the first
+      # time this job actually ran: android/ios used to be tag-only, so
+      # this step never executed before now). Checking out this repo
+      # itself (not the private one — nothing here needs its source) is
+      # enough to give it that context.
+      - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
