@@ -1,0 +1,228 @@
+name: CHORUS CI (relayed from the private repo)
+
+# This repo has no source of its own — it's a public relay target so CI
+# gets unlimited included Actions minutes (private repos have a monthly
+# cap; public repos don't, on any runner type including macOS). A push to
+# song-sheet-studio (private) fires a GitHub webhook to a small Cloudflare
+# Worker, which forwards it here as a repository_dispatch. Every step below
+# checks out the PRIVATE repo's actual source at the pushed commit first.
+on:
+  repository_dispatch:
+    types: [main-push, tag-push]
+
+env:
+  FLUTTER_VERSION: "3.44.4"
+  PRIVATE_REPO: JohnSathya1999/song-sheet-studio
+
+jobs:
+  deploy-web:
+    name: Deploy Web (mirrors deploy-web.yml)
+    if: github.event.action == 'main-push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.PRIVATE_REPO }}
+          token: ${{ secrets.PRIVATE_REPO_PAT }}
+          ref: ${{ github.event.client_payload.sha }}
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - run: flutter pub get
+      - run: flutter analyze
+      - run: flutter build web --release --base-href /app/
+
+      - name: Assemble deploy root (landing page + app)
+        run: |
+          rm -rf deploy_root
+          mkdir -p deploy_root/app
+          cp web_landing/*.html web_landing/*.png deploy_root/
+          cp -r build/web/* deploy_root/app/
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install wrangler
+        working-directory: backend
+        run: npm ci
+
+      - name: Deploy to Cloudflare Pages
+        working-directory: backend
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: npx wrangler pages deploy ../deploy_root --project-name=tpm-song-sheet --branch=main --commit-dirty=true
+
+  deploy-backend:
+    name: Deploy Backend (mirrors deploy-backend.yml)
+    if: github.event.action == 'main-push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.PRIVATE_REPO }}
+          token: ${{ secrets.PRIVATE_REPO_PAT }}
+          ref: ${{ github.event.client_payload.sha }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install dependencies
+        working-directory: backend
+        run: npm ci
+
+      - name: Type-check
+        working-directory: backend
+        run: npx tsc --noEmit -p .
+
+      - name: Deploy to Cloudflare Workers
+        working-directory: backend
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: npx wrangler deploy
+
+  android:
+    name: Android (APK + AAB)
+    if: github.event.action == 'tag-push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.PRIVATE_REPO }}
+          token: ${{ secrets.PRIVATE_REPO_PAT }}
+          ref: ${{ github.event.client_payload.sha }}
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: Provision release signing (if configured)
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > android/app/release.jks
+            cat > android/key.properties <<PROPS
+          storeFile=app/release.jks
+          storePassword=${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          keyAlias=${{ secrets.ANDROID_KEY_ALIAS }}
+          keyPassword=${{ secrets.ANDROID_KEY_PASSWORD }}
+          PROPS
+          else
+            echo "No ANDROID_KEYSTORE_BASE64 secret set — falling back to debug signing."
+          fi
+
+      - run: flutter pub get
+      - run: flutter analyze
+      - run: flutter build apk --release
+      - run: flutter build appbundle --release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-release
+          path: |
+            build/app/outputs/flutter-apk/app-release.apk
+            build/app/outputs/bundle/release/app-release.aab
+          if-no-files-found: error
+
+  ios:
+    name: iOS (unsigned)
+    # Unlike the private repo's release.yml (which only builds this on a
+    # manual run, to save its capped Actions minutes), the public repo's
+    # macOS minutes are unlimited too — no reason left to gate this.
+    if: github.event.action == 'tag-push'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.PRIVATE_REPO }}
+          token: ${{ secrets.PRIVATE_REPO_PAT }}
+          ref: ${{ github.event.client_payload.sha }}
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - run: flutter pub get
+      - run: flutter build ios --release --no-codesign
+
+      - name: Package unsigned .ipa
+        run: |
+          cd build/ios/iphoneos
+          mkdir -p Payload
+          cp -r Runner.app Payload/
+          zip -r ../../../SongSheetStudio-unsigned.ipa Payload
+          cd -
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ios-unsigned
+          path: SongSheetStudio-unsigned.ipa
+          if-no-files-found: error
+
+  release:
+    name: Create GitHub Release (on the private repo)
+    needs: [android, ios]
+    if: ${{ !cancelled() && github.event.action == 'tag-push' && needs.android.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Flatten artifact layout
+        run: |
+          mkdir -p release
+          cp artifacts/android-release/flutter-apk/app-release.apk release/SongSheetStudio.apk
+          cp artifacts/android-release/bundle/release/app-release.aab release/SongSheetStudio.aab
+          if [ -f artifacts/ios-unsigned/SongSheetStudio-unsigned.ipa ]; then
+            cp artifacts/ios-unsigned/SongSheetStudio-unsigned.ipa release/SongSheetStudio-unsigned.ipa
+          fi
+
+      # Releases still live on the private repo (song-sheet-studio),
+      # matching where they've always lived — this workflow just runs
+      # somewhere else now. softprops/action-gh-release doesn't reliably
+      # support targeting a repo other than the one running the workflow,
+      # so this uses `gh release create` directly against PRIVATE_REPO
+      # instead, the same way the public-mirror step below already does.
+      - name: Create the release on the private repo
+        env:
+          GH_TOKEN: ${{ secrets.PRIVATE_REPO_PAT }}
+        run: |
+          tag="${GITHUB_REF_NAME:-${{ github.event.client_payload.ref }}}"
+          tag="${tag#refs/tags/}"
+          gh release create "$tag" release/* \
+            -R "${{ env.PRIVATE_REPO }}" \
+            --title "$tag" \
+            --generate-notes \
+            --notes "## Android
+          - **SongSheetStudio.apk** — install directly on a device (enable \"install unknown apps\" for your file manager/browser first). Debug-signed, which is fine for personal testing but not for Play Store distribution.
+          - **SongSheetStudio.aab** — Android App Bundle, for Play Console upload.
+
+          ## iOS
+          - **SongSheetStudio-unsigned.ipa** — unsigned build. It will **not** install on a real iPhone/iPad through a normal download — Apple requires a signing certificate for that. To actually test on a device, re-sign it yourself with a free Apple ID using a sideloading tool (AltStore, Sideloadly) on a Mac, or run it directly in the iOS Simulator."
+
+      # The private repo's own Release asset downloads require a signed-in
+      # GitHub session (it's private) — no good for an anonymous visitor
+      # clicking "Download for Android" on the public landing page. This
+      # repo *is* that public mirror already, so publishing to it is just
+      # the default GITHUB_TOKEN, no separate secret needed.
+      - name: Publish APK to the public downloads mirror
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create latest release/SongSheetStudio.apk \
+            --title "Latest build" \
+            --notes "Public download mirror — always the most recent TPM Song Sheet Android build." \
+            || gh release upload latest release/SongSheetStudio.apk --clobber
