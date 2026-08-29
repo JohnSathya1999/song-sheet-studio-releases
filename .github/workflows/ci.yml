@@ -47,7 +47,13 @@ jobs:
           rm -rf deploy_root
           mkdir -p deploy_root/app
           cp web_landing/*.html web_landing/*.png deploy_root/
+          # _headers has to sit at the root of what Pages is given, and
+          # it is not matched by the globs above. It is what keeps the
+          # app's code and its tree-shaken icon font from being cached
+          # independently and drifting onto different builds.
+          cp web_landing/_headers deploy_root/
           cp -r build/web/* deploy_root/app/
+          test -f deploy_root/_headers
 
       - uses: actions/setup-node@v4
         with:
