@@ -42,6 +42,13 @@ jobs:
       - run: flutter analyze
       - run: flutter build web --release --base-href /app/
 
+      - name: Give the web fonts content-hashed filenames
+        # The icon font is renumbered by every build, so it and
+        # main.dart.js are only meaningful together. Cache headers do
+        # not settle this -- the zone overrides them for static
+        # extensions -- but a changed filename does.
+        run: python3 tool/hash_web_fonts.py build/web
+
       - name: Assemble deploy root (landing page + app)
         run: |
           rm -rf deploy_root
