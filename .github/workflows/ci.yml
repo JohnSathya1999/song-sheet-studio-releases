@@ -139,7 +139,13 @@ jobs:
           keyPassword=${{ secrets.ANDROID_KEY_PASSWORD }}
           PROPS
           else
-            echo "No ANDROID_KEYSTORE_BASE64 secret set — falling back to debug signing."
+            echo "::error::ANDROID_KEYSTORE_BASE64 is not set."
+            echo "Refusing to build a release APK with debug signing."
+            echo "A debug keystore is generated per machine, so every build"
+            echo "would carry a different certificate, no SHA-1 could stay"
+            echo "registered with Google, and Android sign-in would never"
+            echo "work. This failed silently for over a week."
+            exit 1
           fi
 
       - run: flutter pub get
