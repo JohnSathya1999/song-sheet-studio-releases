@@ -160,6 +160,9 @@ jobs:
         # so a release never depends on somebody having run the script.
         run: python3 tool/sync_version.py
       - run: flutter analyze
+      # The suite has caught a stale version number and an em dash in
+      # shipped copy. It was not running here, so both reached a build.
+      - run: flutter test
       - run: flutter build apk --release
       - run: flutter build appbundle --release
 
